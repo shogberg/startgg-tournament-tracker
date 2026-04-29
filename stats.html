@@ -111,6 +111,27 @@
     input[type="text"]:focus { border-color: var(--accent); }
     input[type="text"]::placeholder { color: var(--muted); }
 
+    select {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.7rem 1rem;
+      font-size: 0.95rem;
+      border-radius: 6px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.15s;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%237a7a90' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 1rem center;
+      padding-right: 2.5rem;
+    }
+    select:focus { border-color: var(--accent); }
+    select option { background: var(--surface2); }
+
     .ac-list {
       position: absolute;
       top: calc(100% + 2px);
@@ -338,6 +359,8 @@
     <div class="nav-tab active" data-page="page-player">Player Lookup</div>
     <div class="nav-tab"        data-page="page-h2h">Head to Head</div>
     <div class="nav-tab"        data-page="page-leaderboard">Points Leaderboard</div>
+    <div class="nav-tab"        data-page="page-top8">Top 8 History</div>
+    <div class="nav-tab"        data-page="page-tourney">Tournament History</div>
     <div class="nav-tab"        data-page="page-giants">Giant Slayers</div>
   </nav>
 </header>
@@ -372,6 +395,39 @@
     <div class="section">
       <div id="leaderboard-wrap">
         <div class="msg">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Page: Top 8 ── -->
+  <div class="page" id="page-top8">
+    <div class="section">
+      <div id="top8-wrap">
+        <div class="msg">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Page: Tournament History ── -->
+  <div class="page" id="page-tourney">
+    <div class="section">
+      <div class="lookup-row">
+        <div class="ac-wrap">
+          <input id="th-input" type="text" placeholder="Search gamertag…" autocomplete="off">
+          <div class="ac-list" id="th-list"></div>
+        </div>
+      </div>
+
+      <div id="th-section" class="hidden" style="margin-top:1.5rem;">
+        <div class="player-header" style="margin-bottom:1.25rem;">
+          <div class="gamer" id="th-name"></div>
+        </div>
+        <div style="margin-bottom:1rem;">
+          <select id="th-tourney-select">
+            <option value="">— select a tournament —</option>
+          </select>
+        </div>
+        <div id="th-matches"></div>
       </div>
     </div>
   </div>
@@ -417,13 +473,15 @@
      State
   ================================================================ */
   let allPlayers = [];
-  const sel = { ps: null, h1: null, h2: null };
+  const sel = { ps: null, h1: null, h2: null, th: null };
+  let thHistory = [];
 
   /* ================================================================
      Tab navigation
   ================================================================ */
   let leaderboardLoaded = false;
   let giantsLoaded      = false;
+  let top8Loaded        = false;
 
   document.querySelectorAll('.nav-tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -432,6 +490,7 @@
       tab.classList.add('active');
       document.getElementById(tab.dataset.page).classList.add('active');
       if (tab.dataset.page === 'page-leaderboard' && !leaderboardLoaded) loadLeaderboard();
+      if (tab.dataset.page === 'page-top8'        && !top8Loaded)        loadTop8();
       if (tab.dataset.page === 'page-giants'      && !giantsLoaded)      loadGiantSlayers();
     });
   });
@@ -555,14 +614,14 @@
         <div class="sub">${data.set_wins}W &ndash; ${data.set_losses}L</div>
       </div>
       <div class="stat-card">
-        <div class="lbl">Top 6 Match Win %</div>
-        <div class="val">${pct(data.top6_wins, data.top6_wins + data.top6_losses)}</div>
-        <div class="sub">${data.top6_wins}W &ndash; ${data.top6_losses}L</div>
+        <div class="lbl">Top 8 Match Win %</div>
+        <div class="val">${pct(data.top8_wins, data.top8_wins + data.top8_losses)}</div>
+        <div class="sub">${data.top8_wins}W &ndash; ${data.top8_losses}L</div>
       </div>
       <div class="stat-card">
-        <div class="lbl">Top 6 Set Win %</div>
-        <div class="val">${pct(data.top6_set_wins, data.top6_set_wins + data.top6_set_losses)}</div>
-        <div class="sub">${data.top6_set_wins}W &ndash; ${data.top6_set_losses}L</div>
+        <div class="lbl">Top 8 Set Win %</div>
+        <div class="val">${pct(data.top8_set_wins, data.top8_set_wins + data.top8_set_losses)}</div>
+        <div class="sub">${data.top8_set_wins}W &ndash; ${data.top8_set_losses}L</div>
       </div>
     `;
 
@@ -624,6 +683,152 @@
               </tr>
             `).join('')}
           </tbody>
+        </table>
+      </div>
+      <div style="margin-top:1.5rem;">
+        <div class="section-label">How Points Are Awarded</div>
+        <div class="table-wrap" style="margin-top:0.5rem;">
+          <table>
+            <thead><tr>
+              <th>Placement</th>
+              <th>Points</th>
+            </tr></thead>
+            <tbody>
+              ${[['1st',10],['2nd',8],['3rd',7],['4th',6],['5th–6th',5],['7th–8th',4],['9th+',1]].map(([place, pts]) => `
+                <tr>
+                  <td>${place}</td>
+                  <td style="font-weight:700;color:var(--accent)">${pts}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  /* ================================================================
+     Top 8
+  ================================================================ */
+  async function loadTop8() {
+    const wrap = document.getElementById('top8-wrap');
+    const res    = await fetch('/api/top8');
+    const groups = await res.json();
+    top8Loaded = true;
+
+    if (!groups.length) {
+      wrap.innerHTML = '<div class="msg">No top 8 data yet.</div>';
+      return;
+    }
+
+    const tBlocks = groups.map(g => {
+      const rows = g.standings.map(s => `
+        <tr>
+          <td>${badge(s.placement)}</td>
+          <td>${esc(s.gamertag)}</td>
+          <td style="font-weight:700;color:var(--accent)">${s.points}</td>
+        </tr>
+      `).join('');
+
+      return `
+        <div class="t-group">
+          <div class="t-header">
+            <span class="t-name">${esc(g.tournament_title)}</span>
+            <span class="t-uuid">${esc(g.event_name)}</span>
+          </div>
+          <table>
+            <thead><tr>
+              <th>Place</th>
+              <th>Player</th>
+              <th>Points</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }).join('');
+
+    wrap.innerHTML = tBlocks;
+  }
+
+  /* ================================================================
+     Tournament History
+  ================================================================ */
+  makeAC('th-input', 'th-list', 'th', function() {
+    if (!sel.th) {
+      document.getElementById('th-section').classList.add('hidden');
+      return;
+    }
+    loadTournamentHistory(sel.th);
+  });
+
+  async function loadTournamentHistory(playerId) {
+    const p = allPlayers.find(x => x.player_id === playerId);
+    document.getElementById('th-name').textContent = p?.gamertag || playerId;
+
+    const res = await fetch(`/api/player/${encodeURIComponent(playerId)}/history`);
+    thHistory = await res.json();
+
+    const selectEl = document.getElementById('th-tourney-select');
+    selectEl.innerHTML = '<option value="">— select a tournament —</option>' +
+      thHistory.map(g =>
+        `<option value="${esc(g.tournament_uuid)}">${esc(g.tournament_title)}</option>`
+      ).join('');
+
+    document.getElementById('th-matches').innerHTML = '';
+    document.getElementById('th-section').classList.remove('hidden');
+  }
+
+  document.getElementById('th-tourney-select').addEventListener('change', function() {
+    const uuid = this.value;
+    if (!uuid) { document.getElementById('th-matches').innerHTML = ''; return; }
+    const group = thHistory.find(g => g.tournament_uuid === uuid);
+    renderTourneyMatches(group);
+  });
+
+  function renderTourneyMatches(group) {
+    const wrap = document.getElementById('th-matches');
+    if (!group || !group.matches.length) {
+      wrap.innerHTML = '<div class="msg">No matches recorded for this tournament.</div>';
+      return;
+    }
+
+    const placementHtml = group.placement != null
+      ? `<span style="margin-left:0.85rem;">${badge(group.placement)}</span>`
+      : '';
+
+    // win / loss summary
+    const wins   = group.matches.filter(m => m.won).length;
+    const losses = group.matches.length - wins;
+
+    const rows = group.matches.map(m => `
+      <tr>
+        <td>${esc(m.round_name || '—')}</td>
+        <td>${esc(m.opponent_gamertag || '—')}</td>
+        <td class="${m.won ? 'win' : 'loss'}">${m.player_score   != null ? m.player_score   : '—'}</td>
+        <td class="${m.won ? 'loss' : 'win'}">${m.opponent_score != null ? m.opponent_score : '—'}</td>
+        <td><span class="${m.won ? 'win' : 'loss'}">${m.won ? 'W' : 'L'}</span></td>
+      </tr>
+    `).join('');
+
+    wrap.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.85rem;flex-wrap:wrap;">
+        <span style="font-weight:700;font-size:0.95rem;">${esc(group.tournament_title)}</span>
+        ${placementHtml}
+        <span style="margin-left:auto;font-size:0.8rem;color:var(--muted);">
+          <span class="win">${wins}W</span> &ndash; <span class="loss">${losses}L</span>
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Round</th>
+            <th>Opponent</th>
+            <th>Your Score</th>
+            <th>Opp Score</th>
+            <th>Result</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
         </table>
       </div>
     `;

@@ -52,6 +52,7 @@ query TournamentInfo($tournamentSlug: String!) {
     id
     name
     slug
+    startAt
   }
 }
 """
@@ -229,7 +230,8 @@ SCHEMA_STATEMENTS = [
         uuid        VARCHAR(36)  NOT NULL PRIMARY KEY,
         start_gg_id BIGINT,
         title       VARCHAR(255),
-        slug        VARCHAR(255) UNIQUE
+        slug        VARCHAR(255) UNIQUE,
+        start_at    INT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
@@ -283,6 +285,33 @@ SCHEMA_STATEMENTS = [
 ]
 
 
+def _run_migrations(conn):
+    """
+    Idempotent schema migrations compatible with all MySQL versions.
+    Checks information_schema before issuing any ALTER TABLE, so it is
+    safe to call on every run regardless of whether the column exists.
+    """
+    migrations = [
+        # (table, column, ALTER statement)
+        ("tournaments", "start_at", "ALTER TABLE tournaments ADD COLUMN start_at INT"),
+    ]
+    with conn.cursor() as cur:
+        for table, column, sql in migrations:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM   information_schema.COLUMNS
+                WHERE  TABLE_SCHEMA = DATABASE()
+                  AND  TABLE_NAME   = %s
+                  AND  COLUMN_NAME  = %s
+                """,
+                (table, column),
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute(sql)
+    conn.commit()
+
+
 def init_db(host: str, port: int, user: str, password: str, database: str):
     """Connect to MySQL, create the database if needed, apply schema, return connection."""
     # Connect without selecting a database first so we can CREATE it
@@ -319,6 +348,8 @@ def init_db(host: str, port: int, user: str, password: str, database: str):
         for stmt in SCHEMA_STATEMENTS:
             cur.execute(stmt)
     conn.commit()
+
+    _run_migrations(conn)
     return conn
 
 
@@ -405,15 +436,24 @@ def main():
 
     existing = db_fetchone(conn, "SELECT uuid FROM tournaments WHERE slug = %s", (tournament["slug"],))
 
+    start_at = tournament.get("startAt")  # Unix timestamp (int) from start.gg
+
     if existing:
         tournament_uuid = existing["uuid"]
         print(f"  Already in DB — uuid: {tournament_uuid}")
+        # Backfill start_at if it was missing from an earlier scrape
+        if start_at:
+            db_execute(
+                conn,
+                "UPDATE tournaments SET start_at = %s WHERE uuid = %s AND start_at IS NULL",
+                (start_at, tournament_uuid),
+            )
     else:
         tournament_uuid = str(uuid.uuid4())
         db_execute(
             conn,
-            "INSERT INTO tournaments (uuid, start_gg_id, title, slug) VALUES (%s, %s, %s, %s)",
-            (tournament_uuid, tournament["id"], tournament["name"], tournament["slug"]),
+            "INSERT INTO tournaments (uuid, start_gg_id, title, slug, start_at) VALUES (%s, %s, %s, %s, %s)",
+            (tournament_uuid, tournament["id"], tournament["name"], tournament["slug"], start_at),
         )
         print(f"  {tournament['name']}")
         print(f"  uuid: {tournament_uuid}")
