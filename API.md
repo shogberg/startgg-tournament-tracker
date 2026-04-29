@@ -23,6 +23,22 @@ The server is configured via environment variables:
 
 ---
 
+## General Notes
+
+### Tournament ordering
+
+All endpoints that return results grouped by tournament sort tournaments by `start_at DESC` (most recent first). `start_at` is a Unix timestamp fetched from the start.gg API when a tournament is scraped. Tournaments scraped before this field was added will have `start_at = NULL` and sort to the end.
+
+### Match ordering within a tournament
+
+Matches within a tournament are sorted in bracket order:
+
+1. **Winners side** — sequentially by round number (Round 1, Round 2 … Quarter-Final, Semi-Final, Final)
+2. **Losers side** — sequentially by round number (Round 1, Round 2 … Quarter-Final, Semi-Final, Final)
+3. **Grand Final**, then **Grand Final Reset**
+
+---
+
 ## Endpoints
 
 ### `GET /`
@@ -74,10 +90,10 @@ Returns full stats for a single player.
   "match_losses": 8,
   "set_wins": 12,
   "set_losses": 4,
-  "top6_wins": 14,
-  "top6_losses": 6,
-  "top6_set_wins": 7,
-  "top6_set_losses": 3
+  "top8_wins": 14,
+  "top8_losses": 6,
+  "top8_set_wins": 7,
+  "top8_set_losses": 3
 }
 ```
 
@@ -92,12 +108,12 @@ Returns full stats for a single player.
 | `match_losses` | Sum of games lost across all matches with recorded scores |
 | `set_wins` | Number of matches (sets) won |
 | `set_losses` | Number of matches (sets) lost |
-| `top6_wins` | Games won in top-6 rounds only |
-| `top6_losses` | Games lost in top-6 rounds only |
-| `top6_set_wins` | Matches won in top-6 rounds only |
-| `top6_set_losses` | Matches lost in top-6 rounds only |
+| `top8_wins` | Games won in top-8 matches only |
+| `top8_losses` | Games lost in top-8 matches only |
+| `top8_set_wins` | Matches won in top-8 matches only |
+| `top8_set_losses` | Matches lost in top-8 matches only |
 
-**Top-6 rounds** are: Winners Semi-Final, Winners Final, Grand Final, Grand Final Reset, Losers Quarter-Final, Losers Semi-Final, Losers Final.
+**Top-8 matches** are defined as any match where the loser's final placement was 7th or better (placement ≤ 7), meaning the match was contested while 8 or fewer players remained in the tournament.
 
 **Match win %** is calculated as:
 > `match_wins / (match_wins + match_losses)`
@@ -110,6 +126,94 @@ Returns full stats for a single player.
 > `set_wins / (set_wins + set_losses)`
 >
 > A simple ratio of matches won vs matches played (all matches, including those without recorded scores).
+
+**Top-8 match win %** uses the same game-score formula as Match win %, restricted to top-8 matches only.
+
+**Top-8 set win %** uses the same match-count formula as Set win %, restricted to top-8 matches only.
+
+---
+
+### `GET /api/player/<player_id>/history`
+
+Returns all matches for a single player across every tournament, grouped by tournament (most recent first). Includes each tournament's final placement and per-match W/L details. Used to power the Tournament History tab.
+
+**URL parameter:** `player_id` — the player's discriminator ID (hex string, e.g. `4d08742f`)
+
+**Response**
+
+```json
+[
+  {
+    "tournament_uuid": "...",
+    "tournament_title": "Secret Labs AZ April 2026",
+    "tournament_slug": "secret-labs-az-april-2026",
+    "placement": 3,
+    "matches": [
+      {
+        "match_id": "12345678",
+        "round_name": "Winners Semi-Final",
+        "identifier": "WF",
+        "display_score": "BigMacCombo98 3 - PlayerX 1",
+        "opponent_gamertag": "PlayerX",
+        "opponent_id": "abcd1234",
+        "won": true,
+        "player_score": 3,
+        "opponent_score": 1
+      }
+    ]
+  }
+]
+```
+
+**Fields — tournament group**
+
+| Field | Description |
+|---|---|
+| `tournament_uuid` | Unique tournament identifier |
+| `tournament_title` | Display name of the tournament |
+| `tournament_slug` | URL slug for linking to start.gg |
+| `placement` | Player's final placement in this tournament (`null` if not recorded) |
+| `matches` | Matches sorted in bracket order (see Match ordering note above) |
+
+**Fields — match**
+
+| Field | Description |
+|---|---|
+| `round_name` | Round label (e.g. `Winners Semi-Final`) |
+| `identifier` | Short bracket identifier (e.g. `WF`) |
+| `display_score` | Raw score string from start.gg |
+| `opponent_gamertag` | Gamertag of the opponent |
+| `opponent_id` | Player ID of the opponent |
+| `won` | `true` if the player won this match |
+| `player_score` | Games won by this player in the match |
+| `opponent_score` | Games won by the opponent in the match |
+
+---
+
+### `GET /api/top8`
+
+Returns top-8 standings (placements 1–8) for every tournament, grouped by tournament and sorted most recent first. Within each tournament, standings are ordered by placement.
+
+**Response**
+
+```json
+[
+  {
+    "tournament_uuid": "...",
+    "tournament_title": "Secret Labs AZ April 2026",
+    "tournament_slug": "secret-labs-az-april-2026",
+    "event_name": "SF6 Singles",
+    "standings": [
+      {
+        "placement": 1,
+        "points": 10,
+        "display_name": "BigMacCombo98",
+        "gamertag": "BigMacCombo98"
+      }
+    ]
+  }
+]
+```
 
 ---
 
@@ -134,7 +238,7 @@ Returns the top 25 players by career points.
 
 ### `GET /api/giant-slayers`
 
-Returns all matches where one of the designated "giant" players lost to a non-giant, grouped by tournament.
+Returns all matches where one of the designated "giant" players lost to a non-giant, grouped by tournament (most recent first). Matches within each tournament are sorted in bracket order.
 
 **Giants** (hardcoded in `GIANTS` tuple in `stats_api.py`): `300a2d8c`, `36513805`, `4d08742f`
 
@@ -169,7 +273,7 @@ Returns all matches where one of the designated "giant" players lost to a non-gi
 
 ### `GET /api/h2h?player1=<id>&player2=<id>`
 
-Returns all matches played between two specific players, grouped by tournament.
+Returns all matches played between two specific players, grouped by tournament (most recent first). Matches within each tournament are sorted in bracket order.
 
 **Query parameters**
 

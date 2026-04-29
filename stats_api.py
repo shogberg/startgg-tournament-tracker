@@ -106,7 +106,7 @@ def player_stats(player_id):
                 JOIN   events      e ON e.id        = s.event_id
                 JOIN   tournaments t ON t.uuid      = s.tournament_uuid
                 WHERE  s.player_id = %s AND s.placement <= 8
-                ORDER  BY s.placement, t.title
+                ORDER  BY s.placement, t.start_at IS NULL, t.start_at DESC
                 """,
                 (player_id,),
             )
@@ -146,47 +146,44 @@ def player_stats(player_id):
             )
             set_row = cur.fetchone()
 
-            # Top 6 match win % — same game-score ratio but only in top-6 rounds
-            TOP6_ROUNDS = (
-                "Winners Semi-Final",
-                "Winners Final",
-                "Grand Final",
-                "Grand Final Reset",
-                "Losers Quarter-Final",
-                "Losers Semi-Final",
-                "Losers Final",
-            )
-            placeholders = ", ".join(["%s"] * len(TOP6_ROUNDS))
+            # Top 8 match win % — game-score ratio for matches where the loser placed 1–7
+            # (i.e. matches contested while 8 or fewer players remained)
             cur.execute(
-                f"""
+                """
                 SELECT
-                    COALESCE(SUM(CASE WHEN winner_player_id = %s THEN winner_player_score ELSE 0 END), 0)
-                  + COALESCE(SUM(CASE WHEN loser_player_id  = %s THEN loser_player_score  ELSE 0 END), 0) AS wins,
-                    COALESCE(SUM(CASE WHEN winner_player_id = %s THEN loser_player_score  ELSE 0 END), 0)
-                  + COALESCE(SUM(CASE WHEN loser_player_id  = %s THEN winner_player_score ELSE 0 END), 0) AS losses
-                FROM   matches
-                WHERE  (winner_player_id = %s OR loser_player_id = %s)
-                  AND  winner_player_score IS NOT NULL
-                  AND  loser_player_score  IS NOT NULL
-                  AND  round_name IN ({placeholders})
+                    COALESCE(SUM(CASE WHEN m.winner_player_id = %s THEN m.winner_player_score ELSE 0 END), 0)
+                  + COALESCE(SUM(CASE WHEN m.loser_player_id  = %s THEN m.loser_player_score  ELSE 0 END), 0) AS wins,
+                    COALESCE(SUM(CASE WHEN m.winner_player_id = %s THEN m.loser_player_score  ELSE 0 END), 0)
+                  + COALESCE(SUM(CASE WHEN m.loser_player_id  = %s THEN m.winner_player_score ELSE 0 END), 0) AS losses
+                FROM   matches m
+                JOIN   standings s ON s.player_id      = m.loser_player_id
+                                  AND s.tournament_uuid = m.tournament_uuid
+                                  AND s.event_id        = m.event_id
+                WHERE  (m.winner_player_id = %s OR m.loser_player_id = %s)
+                  AND  m.winner_player_score IS NOT NULL
+                  AND  m.loser_player_score  IS NOT NULL
+                  AND  s.placement <= 7
                 """,
-                (player_id, player_id, player_id, player_id, player_id, player_id, *TOP6_ROUNDS),
+                (player_id, player_id, player_id, player_id, player_id, player_id),
             )
-            top6_row = cur.fetchone()
+            top8_row = cur.fetchone()
 
-            # Top 6 set win % — match win/loss ratio restricted to the same seven rounds
+            # Top 8 set win % — match count ratio for the same set of matches
             cur.execute(
-                f"""
+                """
                 SELECT
-                    SUM(winner_player_id = %s) AS wins,
-                    SUM(loser_player_id  = %s) AS losses
-                FROM  matches
-                WHERE (winner_player_id = %s OR loser_player_id = %s)
-                  AND  round_name IN ({placeholders})
+                    SUM(m.winner_player_id = %s) AS wins,
+                    SUM(m.loser_player_id  = %s) AS losses
+                FROM  matches m
+                JOIN  standings s ON s.player_id      = m.loser_player_id
+                                 AND s.tournament_uuid = m.tournament_uuid
+                                 AND s.event_id        = m.event_id
+                WHERE (m.winner_player_id = %s OR m.loser_player_id = %s)
+                  AND s.placement <= 7
                 """,
-                (player_id, player_id, player_id, player_id, *TOP6_ROUNDS),
+                (player_id, player_id, player_id, player_id),
             )
-            top6_set_row = cur.fetchone()
+            top8_set_row = cur.fetchone()
 
         return jsonify(
             {
@@ -197,12 +194,64 @@ def player_stats(player_id):
                 "match_losses": int(match_row["losses"] or 0),
                 "set_wins":     int(set_row["wins"]     or 0),
                 "set_losses":   int(set_row["losses"]   or 0),
-                "top6_wins":        int(top6_row["wins"]        or 0),
-                "top6_losses":      int(top6_row["losses"]      or 0),
-                "top6_set_wins":    int(top6_set_row["wins"]    or 0),
-                "top6_set_losses":  int(top6_set_row["losses"]  or 0),
+                "top8_wins":        int(top8_row["wins"]        or 0),
+                "top8_losses":      int(top8_row["losses"]      or 0),
+                "top8_set_wins":    int(top8_set_row["wins"]    or 0),
+                "top8_set_losses":  int(top8_set_row["losses"]  or 0),
             }
         )
+    finally:
+        conn.close()
+
+
+@app.route("/api/top8")
+def top8():
+    """Return top-8 standings for every tournament, ordered by tournament title then placement."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.uuid  AS tournament_uuid,
+                       t.title AS tournament_title,
+                       t.slug  AS tournament_slug,
+                       e.name  AS event_name,
+                       s.placement,
+                       s.points,
+                       s.display_name,
+                       p.gamertag
+                FROM   standings   s
+                JOIN   tournaments t ON t.uuid = s.tournament_uuid
+                JOIN   events      e ON e.id   = s.event_id
+                JOIN   players     p ON p.player_id = s.player_id
+                WHERE  s.placement <= 8
+                ORDER  BY t.start_at IS NULL, t.start_at DESC, s.placement
+                """
+            )
+            rows = cur.fetchall()
+
+        # Group by tournament
+        seen = {}
+        groups = []
+        for r in rows:
+            uuid = r["tournament_uuid"]
+            if uuid not in seen:
+                seen[uuid] = {
+                    "tournament_uuid":  uuid,
+                    "tournament_title": r["tournament_title"],
+                    "tournament_slug":  r["tournament_slug"],
+                    "event_name":       r["event_name"],
+                    "standings": [],
+                }
+                groups.append(seen[uuid])
+            seen[uuid]["standings"].append({
+                "placement":    r["placement"],
+                "points":       r["points"],
+                "display_name": r["display_name"],
+                "gamertag":     r["gamertag"],
+            })
+
+        return jsonify(groups)
     finally:
         conn.close()
 
@@ -257,7 +306,26 @@ def giant_slayers():
                 JOIN   players     pl ON pl.player_id = m.loser_player_id
                 WHERE  m.loser_player_id   IN ({ph})
                   AND  m.winner_player_id  NOT IN ({ph})
-                ORDER  BY t.title, m.round_name
+                ORDER  BY t.start_at IS NULL,
+                          t.start_at DESC,
+                          CASE
+                            WHEN m.round_name LIKE 'Grand Final%%' THEN 2
+                            WHEN m.round_name LIKE 'Losers%%'      THEN 1
+                            ELSE 0
+                          END,
+                          CASE
+                            WHEN m.round_name = 'Grand Final'
+                              THEN 0
+                            WHEN m.round_name = 'Grand Final Reset'
+                              THEN 1
+                            WHEN m.round_name LIKE '%%Round %%'
+                              THEN CAST(SUBSTRING(m.round_name,
+                                        LOCATE('Round ', m.round_name) + 6) AS UNSIGNED)
+                            WHEN m.round_name LIKE '%%Quarter-Final' THEN 900
+                            WHEN m.round_name LIKE '%%Semi-Final'    THEN 950
+                            WHEN m.round_name LIKE '%% Final'        THEN 990
+                            ELSE 500
+                          END
                 """,
                 (*GIANTS, *GIANTS),
             )
@@ -277,6 +345,101 @@ def giant_slayers():
                 }
                 groups.append(seen[uuid])
             seen[uuid]["matches"].append(r)
+
+        return jsonify(groups)
+    finally:
+        conn.close()
+
+
+@app.route("/api/player/<player_id>/history")
+def player_history(player_id):
+    """
+    Return all matches for a player, grouped by tournament.
+    Each group includes the player's placement in that tournament (if recorded).
+    """
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.match_id,
+                       m.round_name,
+                       m.identifier,
+                       m.display_score,
+                       m.tournament_uuid,
+                       m.winner_player_id,
+                       m.winner_player_score,
+                       m.loser_player_score,
+                       t.title AS tournament_title,
+                       t.slug  AS tournament_slug,
+                       CASE WHEN m.winner_player_id = %s
+                            THEN pl.gamertag
+                            ELSE pw.gamertag END AS opponent_gamertag,
+                       CASE WHEN m.winner_player_id = %s
+                            THEN m.loser_player_id
+                            ELSE m.winner_player_id END AS opponent_id
+                FROM   matches     m
+                JOIN   tournaments t  ON t.uuid       = m.tournament_uuid
+                JOIN   players     pw ON pw.player_id  = m.winner_player_id
+                JOIN   players     pl ON pl.player_id  = m.loser_player_id
+                WHERE  m.winner_player_id = %s OR m.loser_player_id = %s
+                ORDER  BY t.start_at IS NULL,
+                          t.start_at DESC,
+                          CASE
+                            WHEN m.round_name LIKE 'Grand Final%%' THEN 2
+                            WHEN m.round_name LIKE 'Losers%%'      THEN 1
+                            ELSE 0
+                          END,
+                          CASE
+                            WHEN m.round_name = 'Grand Final'
+                              THEN 0
+                            WHEN m.round_name = 'Grand Final Reset'
+                              THEN 1
+                            WHEN m.round_name LIKE '%%Round %%'
+                              THEN CAST(SUBSTRING(m.round_name,
+                                        LOCATE('Round ', m.round_name) + 6) AS UNSIGNED)
+                            WHEN m.round_name LIKE '%%Quarter-Final' THEN 900
+                            WHEN m.round_name LIKE '%%Semi-Final'    THEN 950
+                            WHEN m.round_name LIKE '%% Final'        THEN 990
+                            ELSE 500
+                          END
+                """,
+                (player_id, player_id, player_id, player_id),
+            )
+            rows = cur.fetchall()
+
+            # Placement per tournament
+            cur.execute(
+                "SELECT tournament_uuid, placement FROM standings WHERE player_id = %s",
+                (player_id,),
+            )
+            placements = {r["tournament_uuid"]: r["placement"] for r in cur.fetchall()}
+
+        seen = {}
+        groups = []
+        for r in rows:
+            uuid = r["tournament_uuid"]
+            if uuid not in seen:
+                seen[uuid] = {
+                    "tournament_uuid":  uuid,
+                    "tournament_title": r["tournament_title"],
+                    "tournament_slug":  r["tournament_slug"],
+                    "placement":        placements.get(uuid),
+                    "matches":          [],
+                }
+                groups.append(seen[uuid])
+            won = r["winner_player_id"] == player_id
+            seen[uuid]["matches"].append({
+                "match_id":          r["match_id"],
+                "round_name":        r["round_name"],
+                "identifier":        r["identifier"],
+                "display_score":     r["display_score"],
+                "opponent_gamertag": r["opponent_gamertag"],
+                "opponent_id":       r["opponent_id"],
+                "won":               won,
+                "player_score":      r["winner_player_score"] if won else r["loser_player_score"],
+                "opponent_score":    r["loser_player_score"]  if won else r["winner_player_score"],
+            })
 
         return jsonify(groups)
     finally:
@@ -319,7 +482,26 @@ def h2h():
                 JOIN   tournaments t ON t.uuid = m.tournament_uuid
                 WHERE  (m.winner_player_id = %s AND m.loser_player_id = %s)
                     OR (m.winner_player_id = %s AND m.loser_player_id = %s)
-                ORDER  BY t.title, m.round_name
+                ORDER  BY t.start_at IS NULL,
+                          t.start_at DESC,
+                          CASE
+                            WHEN m.round_name LIKE 'Grand Final%%' THEN 2
+                            WHEN m.round_name LIKE 'Losers%%'      THEN 1
+                            ELSE 0
+                          END,
+                          CASE
+                            WHEN m.round_name = 'Grand Final'
+                              THEN 0
+                            WHEN m.round_name = 'Grand Final Reset'
+                              THEN 1
+                            WHEN m.round_name LIKE '%%Round %%'
+                              THEN CAST(SUBSTRING(m.round_name,
+                                        LOCATE('Round ', m.round_name) + 6) AS UNSIGNED)
+                            WHEN m.round_name LIKE '%%Quarter-Final' THEN 900
+                            WHEN m.round_name LIKE '%%Semi-Final'    THEN 950
+                            WHEN m.round_name LIKE '%% Final'        THEN 990
+                            ELSE 500
+                          END
                 """,
                 (p1, p2, p1, p2, p2, p1),
             )
